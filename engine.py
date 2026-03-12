@@ -152,6 +152,16 @@ class LightRay:
         if r < black_hole.event_horizon:
             return
 
+        # check all other black holes too
+        if black_holes:
+            for bh in black_holes:
+                if bh is black_hole:
+                    continue
+                rx2 = self.x - bh.position.x
+                ry2 = self.y - bh.position.y
+                if math.sqrt(rx2**2 + ry2**2) < bh.event_horizon:
+                    return
+
         # init polar velocities from Cartesian direction
         if not self._polar_init:
             cos_p = math.cos(phi)
