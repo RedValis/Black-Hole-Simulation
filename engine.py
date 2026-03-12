@@ -4,17 +4,17 @@ from dataclasses import dataclass, field
 import pygame
 
 
-# ---------------------------------------------
+# -----------------------------------------------
 #  Physical constants
-# ---------------------------------------------
+# -----------------------------------------------
 
-G = 6.674e-11        # gravitational constant  (m³ kg⁻¹ s⁻²)
+G = 6.674e-11        # gravitational constant  (m^3 kg^-1 s^-2)
 C = 299_792_458.0    # speed of light          (m/s)
 
 
-# ---------------------------------------------
+# -----------------------------------------------
 #  Config
-# ---------------------------------------------
+# -----------------------------------------------
 
 @dataclass
 class Config:
@@ -25,9 +25,9 @@ class Config:
     bg_color: tuple = (2, 0, 10)
 
 
-# ---------------------------------------------
-#  Vec2  (lightweight 2-D vector)
-# ---------------------------------------------
+# -----------------------------------------------
+#  Vec2
+# -----------------------------------------------
 
 @dataclass
 class Vec2:
@@ -40,93 +40,107 @@ class Vec2:
     def length(self):          return math.sqrt(self.x ** 2 + self.y ** 2)
 
 
-# ---------------------------------------------
+# -----------------------------------------------
 #  BlackHole
-# ---------------------------------------------
+# -----------------------------------------------
 
 @dataclass
 class BlackHole:
     position: Vec2  = field(default_factory=Vec2)
-    mass:     float = 1e35                          # kg  (stellar-mass scale)
+    mass:     float = 1e35
 
-    # Schwarzschild radius — computed from mass, not passed in
     event_horizon: float = field(init=False)
 
-    # 1 pixel = 2.5e6 m  →  r_s lands at ~60 px (medium, clearly visible)
-    PIXEL_SCALE:   float = field(init=False, repr=False, default=2.5e6)
-    COLOR:         tuple = field(init=False, repr=False, default=(0, 0, 0))
-    BORDER_COLOR:  tuple = field(init=False, repr=False, default=(255, 160, 30))
-    BORDER_WIDTH:  int   = field(init=False, repr=False, default=2)
+    # 1 pixel = 2.5e6 m
+    PIXEL_SCALE:  float = field(init=False, repr=False, default=2.5e6)
+    COLOR:        tuple = field(init=False, repr=False, default=(0, 0, 0))
+    BORDER_COLOR: tuple = field(init=False, repr=False, default=(255, 160, 30))
 
     def __post_init__(self):
-        # Schwarzschild (sealed) radius:  r_s = 2GM / c²
+        # Schwarzschild radius: r_s = 2GM / c^2
         r_s = (2.0 * G * self.mass) / (C ** 2)
-        self.event_horizon = r_s / self.PIXEL_SCALE   # convert to screen pixels
-        print(f"[BlackHole] mass={self.mass:.2e} kg  "
-              f"r_s={r_s:.2e} m  screen_r={self.event_horizon:.1f} px")
+        self.event_horizon = r_s / self.PIXEL_SCALE
+        print(f"[BlackHole] mass={self.mass:.2e} kg  r_s={r_s:.2e} m  screen_r={self.event_horizon:.1f} px")
 
     def draw(self, screen: pygame.Surface) -> None:
         cx = int(self.position.x)
         cy = int(self.position.y)
         r  = max(2, int(self.event_horizon))
 
-        # -- filled black disk (true event horizon) --------------
-        # iterate over full circle: x = cos(θ)·r,  y = sin(θ)·r
-        # then fill with pygame's built-in circle (most efficient)
+        # filled black event horizon disk
         pygame.draw.circle(screen, self.COLOR, (cx, cy), r)
 
-        # -- photon-sphere glow ring ------------------------------
-        # drawn by stepping around the circumference manually so we
-        # can swap in custom per-pixel colour later if needed
+        # photon-sphere border: manual cos/sin loop
         num_steps = max(180, r * 4)
-        step      = (2.0 * math.pi) / num_steps
+        angle_step = (2.0 * math.pi) / num_steps
         for i in range(num_steps):
-            angle = i * step
+            angle = i * angle_step
             px = cx + int(math.cos(angle) * r)
             py = cy + int(math.sin(angle) * r)
             screen.set_at((px, py), self.BORDER_COLOR)
 
 
-# ---------------------------------------------
+# -----------------------------------------------
 #  LightRay
-# ---------------------------------------------
+# -----------------------------------------------
 
 @dataclass
 class LightRay:
     x:  float = 0.0
     y:  float = 0.0
-    dx: float = 1.0    # unit direction  (normalised by caller)
+    dx: float = 1.0    # unit direction (normalised by caller)
     dy: float = 0.0
 
-    # Must match BlackHole.PIXEL_SCALE — 1 px = 2.5e6 m
-    PIXEL_SCALE: float = 2.5e6
-    # C / PIXEL_SCALE = ~120 px/s raw; * speed_scale = ~360 px/s
-    # ray crosses 1280 px in ~3.5 s — visibly smooth
-    speed_scale: float = 3.0
-    COLOR:       tuple = (255, 240, 180)   # warm white
+    # Must match BlackHole.PIXEL_SCALE
+    PIXEL_SCALE:  float = 2.5e6
+    speed_scale:  float = 3.0
+    TRAIL_LENGTH: int   = 120          # how many positions to remember
+    COLOR:        tuple = (255, 240, 180)
+
+    # trail stores (x, y) tuples; oldest at index 0, newest at -1
+    trail: list = field(default_factory=list)
 
     def draw(self, screen: pygame.Surface) -> None:
-        """Render the ray's current position as a single bright pixel."""
-        screen.set_at((int(self.x), int(self.y)), self.COLOR)
+        """
+        Draw the trail with a fade from dim (tail) to bright (tip).
+        Each point is a small circle that grows slightly toward the tip.
+        """
+        n = len(self.trail)
+        for i, (tx, ty) in enumerate(self.trail):
+            # t: 0.0 at oldest tail, 1.0 at newest tip
+            t = i / max(n - 1, 1)
+
+            # brightness ramps 20 -> 255
+            alpha = int(20 + 235 * t)
+
+            # colour: dim blue-white at tail, warm white at tip
+            r = min(255, int((180 + 75 * t) * alpha / 255))
+            g = min(255, int((160 + 80 * t) * alpha / 255))
+            b = min(255, int((100 + 80 * t) * alpha / 255))
+
+            radius = max(1, int(2 * t) + 1)
+            pygame.draw.circle(screen, (r, g, b), (int(tx), int(ty)), radius)
+
+        # bright tip dot drawn last so it sits on top
+        pygame.draw.circle(screen, self.COLOR, (int(self.x), int(self.y)), 3)
 
     def step(self, dt: float) -> None:
         """
-        Advance the ray by one timestep.
-
-        Real-space displacement = C * dt  (metres)
-        Screen displacement     = (C * dt) / PIXEL_SCALE  (pixels)
-
-        dt is in seconds — even a single frame (≈0.016 s) moves the
-        ray ~4.8e6 km, so we keep PIXEL_SCALE large to keep it on screen.
+        Move the ray forward one timestep and append the new position to the trail.
+        Pop the oldest entry once the trail exceeds TRAIL_LENGTH.
         """
         dist_px = (C * dt) / self.PIXEL_SCALE * self.speed_scale
         self.x += self.dx * dist_px
         self.y += self.dy * dist_px
 
+        self.trail.append((self.x, self.y))
+        if len(self.trail) > self.TRAIL_LENGTH:
+            self.trail.pop(0)
 
-# ---------------------------------------------
+
+# -----------------------------------------------
 #  Engine
-# ---------------------------------------------
+# -----------------------------------------------
 
 @dataclass
 class Engine:
@@ -139,7 +153,7 @@ class Engine:
 
     def init(self) -> None:
         pygame.init()
-        self.screen  = pygame.display.set_mode(
+        self.screen = pygame.display.set_mode(
             (self.config.width, self.config.height),
             pygame.DOUBLEBUF | pygame.HWSURFACE
         )
@@ -177,40 +191,47 @@ class Engine:
         W, H = self.config.width, self.config.height
         font = pygame.font.SysFont("monospace", 14)
 
-        # -- Black hole centred on screen --------------------------
         black_hole = BlackHole(
-            position = Vec2(W / 2, H / 2),
-            mass     = 1e35,
+            position=Vec2(W / 2, H / 2),
+            mass=1e35,
         )
 
-        # -- Test ray — fires from left edge, aimed horizontally ---
-        ray = LightRay(
-            x  = 50.0,
-            y  = H / 2,
-            dx = 1.0,
-            dy = 0.0,
-        )
+        # --- cluster of parallel rays ---
+        # evenly spaced across the full screen height, all fired horizontally
+        NUM_RAYS = 20
+        SPACING  = H / (NUM_RAYS + 1)
+        START_X  = 50.0
+
+        def make_rays():
+            return [
+                LightRay(x=START_X, y=SPACING * (i + 1), dx=1.0, dy=0.0)
+                for i in range(NUM_RAYS)
+            ]
+
+        rays = make_rays()
 
         while self.running:
             self.handle_events()
             self.begin_frame()
 
-            # -- update ---------------------------------------------
-            ray.step(self.dt)
+            # update all rays; reset individually when they leave the screen
+            for i, ray in enumerate(rays):
+                ray.step(self.dt)
+                if ray.x > W or ray.y > H or ray.x < 0 or ray.y < 0:
+                    ray.x  = START_X
+                    ray.y  = SPACING * (i + 1)
+                    ray.dx = 1.0
+                    ray.dy = 0.0
+                    ray.trail.clear()
 
-            # reset ray when it leaves the screen (loop for testing)
-            if ray.x > W or ray.y > H or ray.x < 0 or ray.y < 0:
-                ray.x, ray.y = 50.0, H / 2
-
-            # -- draw -----------------------------------------------
-            ray.draw(self.screen)
+            # draw rays first, black hole on top
+            for ray in rays:
+                ray.draw(self.screen)
             black_hole.draw(self.screen)
 
-            # -- HUD ------------------------------------------------
+            # HUD
             hud = font.render(
-                f"FPS: {self.clock.get_fps():.0f}   "
-                f"t={self.elapsed:.1f}s   "
-                f"ray=({ray.x:.0f}, {ray.y:.0f})",
+                f"FPS: {self.clock.get_fps():.0f}   t={self.elapsed:.1f}s   rays={NUM_RAYS}",
                 True, (80, 160, 255)
             )
             self.screen.blit(hud, (12, 12))
@@ -220,9 +241,9 @@ class Engine:
         self.shutdown()
 
 
-# ---------------------------------------------
+# -----------------------------------------------
 #  Entry point
-# ---------------------------------------------
+# -----------------------------------------------
 
 if __name__ == "__main__":
     engine = Engine(config=Config())
