@@ -4,17 +4,9 @@ from dataclasses import dataclass, field
 import pygame
 
 
-# -----------------------------------------------
-#  Physical constants
-# -----------------------------------------------
+G = 6.674e-11       # gravitational constant (m^3 kg^-1 s^-2)
+C = 299_792_458.0   # speed of light (m/s)
 
-G = 6.674e-11        # gravitational constant  (m^3 kg^-1 s^-2)
-C = 299_792_458.0    # speed of light          (m/s)
-
-
-# -----------------------------------------------
-#  Config
-# -----------------------------------------------
 
 @dataclass
 class Config:
@@ -24,10 +16,6 @@ class Config:
     fps:      int   = 60
     bg_color: tuple = (2, 0, 10)
 
-
-# -----------------------------------------------
-#  Vec2
-# -----------------------------------------------
 
 @dataclass
 class Vec2:
@@ -40,10 +28,6 @@ class Vec2:
     def length(self):          return math.sqrt(self.x ** 2 + self.y ** 2)
 
 
-# -----------------------------------------------
-#  BlackHole
-# -----------------------------------------------
-
 @dataclass
 class BlackHole:
     position: Vec2  = field(default_factory=Vec2)
@@ -51,13 +35,13 @@ class BlackHole:
 
     event_horizon: float = field(init=False)
 
-    # 1 pixel = 2.5e6 m
+    # 1 pixel = 2.5e6 m  (tuned so the BH is visible on screen)
     PIXEL_SCALE:  float = field(init=False, repr=False, default=2.5e6)
     COLOR:        tuple = field(init=False, repr=False, default=(0, 0, 0))
     BORDER_COLOR: tuple = field(init=False, repr=False, default=(255, 160, 30))
 
     def __post_init__(self):
-        # Schwarzschild radius: r_s = 2GM / c^2
+        # r_s = 2GM / c^2
         r_s = (2.0 * G * self.mass) / (C ** 2)
         self.event_horizon = r_s / self.PIXEL_SCALE
         print(f"[BlackHole] mass={self.mass:.2e} kg  r_s={r_s:.2e} m  screen_r={self.event_horizon:.1f} px")
@@ -67,10 +51,9 @@ class BlackHole:
         cy = int(self.position.y)
         r  = max(2, int(self.event_horizon))
 
-        # filled black event horizon disk
         pygame.draw.circle(screen, self.COLOR, (cx, cy), r)
 
-        # photon-sphere border: manual cos/sin loop
+        # draw the photon sphere ring manually so I can control the color
         num_steps = max(180, r * 4)
         angle_step = (2.0 * math.pi) / num_steps
         for i in range(num_steps):
@@ -80,47 +63,36 @@ class BlackHole:
             screen.set_at((px, py), self.BORDER_COLOR)
 
 
-# -----------------------------------------------
-#  LightRay
-# -----------------------------------------------
-
 @dataclass
 class LightRay:
     x:  float = 0.0
     y:  float = 0.0
-    dx: float = 1.0    # unit direction (normalised by caller)
+    dx: float = 1.0
     dy: float = 0.0
 
-    # Must match BlackHole.PIXEL_SCALE
     PIXEL_SCALE:  float = 2.5e6
-    speed_scale:  float = 400.0  # ~800 px/frame -> visibly fast
-    TRAIL_LENGTH: int   = 2000         # long enough to show the full curved path
+    speed_scale:  float = 400.0
+    TRAIL_LENGTH: int   = 2000
     COLOR:        tuple = (255, 240, 180)
 
-    # polar velocities (set lazily on first step from dx/dy)
-    dr:   float = 0.0    # radial velocity       dr/dlambda
-    dphi: float = 0.0    # angular velocity    dphi/dlambda
-    _polar_init: bool = False   # flag: have we converted dx/dy -> dr/dphi yet?
+    # polar coords, initialized lazily from dx/dy on first step
+    dr:   float = 0.0
+    dphi: float = 0.0
+    _polar_init: bool = False
 
-    # trail stores (x, y) tuples; oldest at index 0, newest at -1
     trail: list = field(default_factory=list)
 
     def draw(self, screen: pygame.Surface) -> None:
-        """
-        Draw the trail as a connected line that fades from dim (tail) to bright (tip).
-        Segments are drawn in batches of 8 to keep per-frame draw calls low.
-        """
         n = len(self.trail)
         if n < 2:
             return
 
-        SEGMENT = 8   # points per polyline chunk
+        SEGMENT = 8
         for start in range(0, n - 1, SEGMENT):
             chunk = self.trail[start: start + SEGMENT + 1]
             if len(chunk) < 2:
                 break
 
-            # t at midpoint of this chunk -> 0.0 (tail) .. 1.0 (tip)
             t = (start + SEGMENT / 2) / max(n - 1, 1)
             t = min(t, 1.0)
 
@@ -132,17 +104,10 @@ class LightRay:
             pts = [(int(px), int(py)) for px, py in chunk]
             pygame.draw.lines(screen, (r, g, b), False, pts, 2)
 
-        # bright tip
         pygame.draw.circle(screen, self.COLOR, (int(self.x), int(self.y)), 3)
 
     def step(self, dt: float, black_hole: "BlackHole", black_holes: list = None) -> None:
-        """
-        Advance the ray using RK4 integration of the Schwarzschild geodesic.
-
-        h is the affine parameter step size — controls both speed and
-        integration accuracy. Smaller h = slower but more accurate curves.
-        """
-        H = 3.5   # affine step size — tune for speed, curve accuracy unchanged
+        H = 3.5   # affine step — smaller = more accurate curves but slower
 
         rx  = self.x - black_hole.position.x
         ry  = self.y - black_hole.position.y
@@ -152,7 +117,6 @@ class LightRay:
         if r < black_hole.event_horizon:
             return
 
-        # check all other black holes too
         if black_holes:
             for bh in black_holes:
                 if bh is black_hole:
@@ -162,7 +126,6 @@ class LightRay:
                 if math.sqrt(rx2**2 + ry2**2) < bh.event_horizon:
                     return
 
-        # init polar velocities from Cartesian direction
         if not self._polar_init:
             cos_p = math.cos(phi)
             sin_p = math.sin(phi)
@@ -170,7 +133,6 @@ class LightRay:
             self.dphi = (-self.dx * sin_p + self.dy * cos_p) / r
             self._polar_init = True
 
-        # RK4: takes 4 educated trial steps and blends them
         bhs = black_holes if black_holes else [black_hole]
         r, phi, self.dr, self.dphi = rk4(
             r, phi, self.dr, self.dphi,
@@ -185,17 +147,9 @@ class LightRay:
             self.trail.pop(0)
 
 
-# -----------------------------------------------
-#  Geodesic  (Schwarzschild null geodesic equations)
-# -----------------------------------------------
-
 def geodesic(r: float, dr: float, dphi: float, rs: float):
-    """
-    Schwarzschild null geodesic accelerations.
-
-      d2phi = -2/r * dr * dphi
-      d2r   = -(C2_PX * rs) / (2r^2)  +  r * dphi^2
-    """
+    # Schwarzschild null geodesic — d2phi and d2r
+    # C2_PX is the effective c^2 in pixel space, tuned by hand
     C2_PX = 15
 
     d2phi = (-2.0 / r) * dr * dphi
@@ -205,25 +159,15 @@ def geodesic(r: float, dr: float, dphi: float, rs: float):
 
 def rk4(r: float, phi: float, dr: float, dphi: float,
         primary_bh, black_holes: list, h: float):
-    """
-    Runge-Kutta 4 integrator for multi-body Schwarzschild geodesic.
-
-    State vector: (r, phi, dr, dphi) — polar coords centred on primary_bh.
-
-    Extra black holes are handled by converting their gravitational pull
-    to Cartesian, summing, then projecting back into the primary BH polar frame.
-    """
     C2_PX = 15
 
     def derivs(r_, phi_, dr_, dphi_):
         if r_ <= 0:
             return 0.0, 0.0, 0.0, 0.0
 
-        # --- primary BH geodesic (polar) ---
         d2r_, d2phi_ = geodesic(r_, dr_, dphi_, primary_bh.event_horizon)
 
-        # --- extra BH gravity (Cartesian, then projected) ---
-        # ray position in screen space
+        # extra BH gravity: compute in cartesian then project back to polar
         ray_x = primary_bh.position.x + r_ * math.cos(phi_)
         ray_y = primary_bh.position.y + r_ * math.sin(phi_)
 
@@ -237,12 +181,10 @@ def rk4(r: float, phi: float, dr: float, dphi: float,
             r2  = math.sqrt(rx2 ** 2 + ry2 ** 2)
             if r2 < bh.event_horizon:
                 continue
-            # gravitational acceleration toward this BH
             mag = C2_PX * bh.event_horizon / (2.0 * r2 ** 2)
             ax_extra -= mag * (rx2 / r2)
             ay_extra -= mag * (ry2 / r2)
 
-        # project Cartesian extras onto primary BH polar frame
         cos_p = math.cos(phi_)
         sin_p = math.sin(phi_)
         d2r_   += ax_extra * cos_p  + ay_extra * sin_p
@@ -268,10 +210,6 @@ def rk4(r: float, phi: float, dr: float, dphi: float,
 
     return r_new, phi_new, dr_new, dphi_new
 
-
-# -----------------------------------------------
-#  Engine
-# -----------------------------------------------
 
 @dataclass
 class Engine:
@@ -327,16 +265,15 @@ class Engine:
             mass=1e35,
         )
 
-        BH_SPEED    = 4.0
-        mode        = 1
-        dual_mode   = False   # toggled with B
+        BH_SPEED  = 4.0
+        mode      = 1
+        dual_mode = False   # toggled with B
 
         black_hole2 = BlackHole(
             position=Vec2(W * 0.65, H * 0.4),
             mass=1e35,
         )
 
-        # ── Mode 1: parallel cluster ─────────────────────────────
         NUM_RAYS = 60
         SPACING  = H / (NUM_RAYS + 1)
         START_X  = 50.0
@@ -347,12 +284,10 @@ class Engine:
                 for i in range(NUM_RAYS)
             ]
 
-        # ── Mode 2: point-source fan from top-left ───────────────
-        NUM_FAN  = 60
+        NUM_FAN = 60
         def make_fan_rays():
             rays = []
             for i in range(NUM_FAN):
-                # spread angles from ~0 to ~90 degrees
                 angle = math.radians(i * 90.0 / (NUM_FAN - 1))
                 rays.append(LightRay(
                     x=10.0, y=10.0,
@@ -361,7 +296,6 @@ class Engine:
                 ))
             return rays
 
-        # ── Mode 3: orbital ray at photon sphere ─────────────────
         def make_orbital_ray():
             rs        = black_hole.event_horizon
             r_orb     = 1.5 * rs * 1.03
@@ -376,7 +310,6 @@ class Engine:
             ray._polar_init =  True
             return ray
 
-        # initialise starting mode
         rays = make_parallel_rays()
 
         def reset_rays():
@@ -389,7 +322,6 @@ class Engine:
                 rays = [make_orbital_ray()]
 
         def reset_ray(i, ray):
-            """Reset a single ray back to its spawn position for the current mode."""
             if mode == 1:
                 ray.x = START_X;  ray.y = SPACING * (i + 1)
                 ray.dx = 1.0;     ray.dy = 0.0
@@ -402,7 +334,6 @@ class Engine:
                 ray.dr = 0.0;  ray.dphi = 0.0
                 ray._polar_init = False;   ray.trail.clear()
             else:
-                # rebuild orbital ray in place
                 rs        = black_hole.event_horizon
                 r_orb     = 1.5 * rs * 1.03
                 dphi_circ = math.sqrt(15.0 * rs / (2.0 * r_orb ** 3))
@@ -417,7 +348,6 @@ class Engine:
         MODE_LABELS = {1: "1: Parallel cluster", 2: "2: Point source fan", 3: "3: Orbital"}
 
         while self.running:
-            # ── events ───────────────────────────────────────────
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
@@ -433,7 +363,6 @@ class Engine:
                     elif event.key == pygame.K_b:
                         dual_mode = not dual_mode;  reset_rays()
 
-            # ── arrow keys move black hole ────────────────────────
             keys = pygame.key.get_pressed()
             moved = False
             if keys[pygame.K_LEFT]:  black_hole.position.x -= BH_SPEED;  moved = True
@@ -441,25 +370,22 @@ class Engine:
             if keys[pygame.K_UP]:    black_hole.position.y -= BH_SPEED;  moved = True
             if keys[pygame.K_DOWN]:  black_hole.position.y += BH_SPEED;  moved = True
             if moved:
-                reset_rays()   # clear trails when black hole moves
+                reset_rays()
 
             self.begin_frame()
 
-            # ── update ───────────────────────────────────────────
             for i, ray in enumerate(rays):
                 bh_list = [black_hole, black_hole2] if dual_mode else [black_hole]
                 ray.step(self.dt, black_hole, bh_list)
                 if ray.x > W + 50 or ray.x < -50 or ray.y > H + 50 or ray.y < -50:
                     reset_ray(i, ray)
 
-            # ── draw ─────────────────────────────────────────────
             for ray in rays:
                 ray.draw(self.screen)
             if dual_mode:
                 black_hole2.draw(self.screen)
             black_hole.draw(self.screen)
 
-            # ── HUD ──────────────────────────────────────────────
             hud = font.render(
                 f"FPS: {self.clock.get_fps():.0f}   {MODE_LABELS[mode]}   "
                 f"[1/2/3] mode   [B] dual BH: {'ON' if dual_mode else 'OFF'}   arrows: move BH1",
@@ -471,10 +397,6 @@ class Engine:
 
         self.shutdown()
 
-
-# -----------------------------------------------
-#  Entry point
-# -----------------------------------------------
 
 if __name__ == "__main__":
     engine = Engine(config=Config())
