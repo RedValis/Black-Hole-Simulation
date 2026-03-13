@@ -4,7 +4,7 @@
 # install: pip install moderngl pygame numpy
 #
 # controls:
-#   left mouse drag  - orbit camera
+#   left mouse drag  - orbit (azimuth + elevation)
 #   scroll           - zoom
 #   G                - toggle n-body gravity
 #   Q / ESC          - quit
@@ -15,18 +15,17 @@ import moderngl
 import numpy as np
 
 
-G_CONST = 6.67430e-11
-C_LIGHT = 299792458.0
-SAGA_RS = 1.269e10      # schwarzschild radius of sgr A*
-D_LAMBDA = 1e7          # affine step size
-STEPS   = 60000         # rk4 steps per ray
+G_CONST  = 6.67430e-11
+C_LIGHT  = 299792458.0
+SAGA_RS  = 1.269e10      # schwarzschild radius of sgr A*
+D_LAMBDA = 1e7           # affine step size
+STEPS    = 60000         # rk4 steps per ray
 ESCAPE_R = 1e30
 
 WIN_W, WIN_H   = 800, 600
-COMP_W, COMP_H = 400, 300   # actual render res, gets upscaled to window
+COMP_W, COMP_H = 200, 150   # render res, gets upscaled to window
 
 
-# simple passthrough vert for the fullscreen quad
 VERT = """
 #version 330
 layout(location=0) in vec2 aPos;
@@ -49,7 +48,8 @@ layout(location=0) in vec2 aPos;
 void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
 """
 
-# the actual ray tracer — runs entirely on GPU, one thread per pixel
+# the actual ray tracer — runs on GPU, one thread per pixel
+# direct port of geodesic.comp, y is up, disk is in xz plane
 RAYTRACE_FRAG = """
 #version 330
 out vec4 fragColor;
@@ -61,18 +61,18 @@ uniform vec3  camForward;
 uniform float tanHalfFov;
 uniform float aspect;
 uniform vec2  resolution;
+
 uniform float disk_r1;
 uniform float disk_r2;
+
 uniform int   numObjects;
-uniform vec4  objPosRadius[4];
+uniform vec4  objPosRadius[4];   // xyz=pos, w=radius
 uniform vec4  objColor[4];
 
 const float SagA_rs  = 1.269e10;
 const float D_LAMBDA = 1e7;
 const int   STEPS    = 60000;
 
-// spherical coords, y-up convention
-// theta = angle from +Y, phi = azimuth in XZ plane
 struct Ray {
     float x, y, z;
     float r, theta, phi;
@@ -84,15 +84,18 @@ Ray initRay(vec3 pos, vec3 dir) {
     Ray ray;
     ray.x = pos.x; ray.y = pos.y; ray.z = pos.z;
     ray.r     = length(pos);
-    ray.theta = acos(clamp(pos.y / ray.r, -1.0, 1.0));
-    ray.phi   = atan(pos.z, pos.x);
+    ray.theta = acos(clamp(pos.y / ray.r, -1.0, 1.0));  // y is up
+    ray.phi   = atan(pos.z, pos.x);                       // xz plane
 
     float dx = dir.x, dy = dir.y, dz = dir.z;
-    // y-up spherical basis projection
+    // spherical basis projection — y-up version of C++ initRay
     ray.dr     =  sin(ray.theta)*cos(ray.phi)*dx
                 + cos(ray.theta)*dy
-                - sin(ray.theta)*sin(ray.phi)*dz;
-    // TODO: clean this up, still has the old z-up leftover coords below
+                - sin(ray.theta)*sin(ray.phi)*dz;  // wait — C++ uses atan(y,x), y-up
+    // Match C++ exactly: C++ has pos.z/r for acos, atan(pos.y, pos.x)
+    // re-derive with z-up then swap. Actually mirror C++ directly:
+    // C++ theta = acos(pos.z / r), phi = atan(pos.y, pos.x)
+    // recompute with C++ convention (z-up):
     ray.theta = acos(clamp(pos.z / ray.r, -1.0, 1.0));
     ray.phi   = atan(pos.y, pos.x);
 
@@ -151,7 +154,6 @@ void rk4Step(inout Ray ray, float dL) {
     ray.z = ray.r * cos(ray.theta);
 }
 
-// disk sits in the equatorial plane (z=0), radius measured in XY
 bool crossesDisk(vec3 oldP, vec3 newP) {
     bool crossed = (oldP.z * newP.z < 0.0);
     float r = length(vec2(newP.x, newP.y));
@@ -176,21 +178,6 @@ bool interceptObject(Ray ray, out vec4 color) {
     return false;
 }
 
-// procedural star field so escaped rays aren't just black
-vec3 starfield(vec3 dir) {
-    dir = normalize(dir);
-    ivec3 cell = ivec3(floor(dir * 20.0));
-    int h = abs(cell.x*127 + cell.y*311 + cell.z*541) % 997;
-    if (h > 980) {
-        float b = 0.4 + 0.6*float(h-980)/17.0;
-        int t = h % 3;
-        if (t == 0) return vec3(b);
-        if (t == 1) return vec3(b, b*0.9, b*0.6);
-        return vec3(b*0.7, b*0.85, b);
-    }
-    return vec3(0.004, 0.004, 0.012);
-}
-
 void main() {
     vec2 pix = gl_FragCoord.xy;
     float u  = (2.0*(pix.x+0.5)/resolution.x - 1.0) * aspect * tanHalfFov;
@@ -202,12 +189,10 @@ void main() {
     vec3 prevPos = vec3(ray.x, ray.y, ray.z);
     vec4 color   = vec4(0.0);
     vec4 objHitColor;
-    bool hit = false;
 
     for (int i = 0; i < STEPS; i++) {
         if (ray.r <= SagA_rs) {
             color = vec4(0.0, 0.0, 0.0, 1.0);
-            hit = true;
             break;
         }
 
@@ -218,13 +203,11 @@ void main() {
         if (crossesDisk(prevPos, newPos)) {
             float r = length(vec2(ray.x, ray.y)) / disk_r2;
             color = vec4(1.0, r, 0.2, 1.0);
-            hit = true;
             break;
         }
 
         if (interceptObject(ray, objHitColor)) {
             color = objHitColor;
-            hit = true;
             break;
         }
 
@@ -233,13 +216,10 @@ void main() {
         if (ray.r > 1e30) break;
     }
 
-    if (!hit) color = vec4(starfield(dir), 1.0);
-
     fragColor = color;
 }
 """
 
-# warped grid — deforms vertices on CPU using schwarzschild geometry
 GRID_VERT = """
 #version 330
 layout(location=0) in vec3 aPos;
@@ -253,47 +233,12 @@ out vec4 fragColor;
 void main() { fragColor = vec4(0.2, 0.5, 1.0, 0.45); }
 """
 
-# sphere billboards so objects are visible on the grid
-SPHERE_VERT = """
-#version 330
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aColor;
-layout(location=2) in float aRadius;
-out vec3 vColor;
-out vec2 vUV;
-uniform mat4 viewProj;
-uniform vec3 camRight;
-uniform vec3 camUp;
-void main() {
-    int corner = gl_VertexID % 4;
-    vec2 off = vec2(corner < 2 ? -1.0 : 1.0,
-                    corner % 2 == 0 ? -1.0 : 1.0);
-    vec3 world = aPos + (camRight * off.x + camUp * off.y) * aRadius;
-    gl_Position = viewProj * vec4(world, 1.0);
-    vColor = aColor;
-    vUV    = off;
-}
-"""
-SPHERE_FRAG = """
-#version 330
-in vec3 vColor;
-in vec2 vUV;
-out vec4 fragColor;
-void main() {
-    float d = dot(vUV, vUV);
-    if (d > 1.0) discard;
-    float rim = 1.0 - sqrt(d);
-    float light = 0.3 + 0.7 * rim;
-    fragColor = vec4(vColor * light, 1.0);
-}
-"""
-
 
 class Camera:
     def __init__(self):
-        self.radius    = 7e11
+        self.radius    = 6.34194e10
         self.min_r     = 1e10
-        self.max_r     = 5e12
+        self.max_r     = 1e12
         self.azimuth   = 0.0
         self.elevation = math.pi / 2.0
         self.orbit_spd = 0.01
@@ -314,7 +259,7 @@ class Camera:
         px, py, pz = self.position()
         l  = math.sqrt(px*px + py*py + pz*pz)
         fx, fy, fz = -px/l, -py/l, -pz/l
-        # right = cross(fwd, world_up) where world up is Y
+        # right = cross(fwd, world_up) — y is up
         rx =  fz;   ry = 0.0;  rz = -fx
         rl  = math.sqrt(rx*rx + rz*rz) + 1e-12
         rx /= rl;  rz /= rl
@@ -348,14 +293,14 @@ class ObjectData:
 
 def make_objects():
     return [
-        ObjectData((4e11, 0, 0),    4e10, (1,1,0), 1.98892e30),
-        ObjectData((0, 0, 4e11),    4e10, (1,0,0), 1.98892e30),
-        # black hole — just here for gravity, shader handles the rendering
-        ObjectData((0, 0, 0), SAGA_RS, (0,0,0), 8.54e36),
+        ObjectData((4e11, 0, 0),    4e10,  (1,1,0), 1.98892e30),
+        ObjectData((0,    0, 4e11), 4e10,  (1,0,0), 1.98892e30),
+        # black hole — just here for gravity, shader handles rendering
+        ObjectData((0,    0, 0),    SAGA_RS, (0,0,0), 8.54e36),
     ]
 
 
-def generate_grid(objects, grid_size=25, spacing=4e10):
+def generate_grid(objects, grid_size=25, spacing=1e10):
     verts = []
     for zi in range(grid_size + 1):
         for xi in range(grid_size + 1):
@@ -382,7 +327,7 @@ def generate_grid(objects, grid_size=25, spacing=4e10):
             i = zi * (grid_size + 1) + xi
             indices += [i, i + 1, i, i + grid_size + 1]
 
-    vdata = np.array(verts, dtype=np.float32).flatten()
+    vdata = np.array(verts,   dtype=np.float32).flatten()
     idata = np.array(indices, dtype=np.uint32)
     return vdata, idata
 
@@ -457,7 +402,6 @@ def main():
 
     grid_prog = ctx.program(vertex_shader=GRID_VERT, fragment_shader=GRID_FRAG)
 
-    # render at lower res and upscale — GPU can't do 60k steps at full 800x600
     tex = ctx.texture((COMP_W, COMP_H), 4)
     tex.filter = moderngl.LINEAR, moderngl.LINEAR
     fbo = ctx.framebuffer(color_attachments=[tex])
@@ -472,9 +416,6 @@ def main():
                                 [(grid_vbo, '3f', 'aPos')],
                                 index_buffer=grid_ibo,
                                 index_element_size=4)
-
-    sphere_prog = ctx.program(vertex_shader=SPHERE_VERT, fragment_shader=SPHERE_FRAG)
-    sphere_vbo  = ctx.buffer(reserve=4 * 7 * 4 * 10)
 
     print(f"[BH3D] {WIN_W}x{WIN_H} window  |  {COMP_W}x{COMP_H} render  |  {STEPS} RK4 steps/ray")
     print("[BH3D] G = toggle gravity  |  drag = orbit  |  scroll = zoom")
@@ -513,7 +454,7 @@ def main():
         disk_r1 = SAGA_RS * 2.2
         disk_r2 = SAGA_RS * 5.2
 
-        shade_objs = objects[:2]
+        shade_objs = objects[:2]   # just the planets, not the black hole
 
         fbo.use()
         fbo.clear(0, 0, 0, 1)
@@ -529,7 +470,7 @@ def main():
         rt_prog['disk_r2'].value    = disk_r2
         rt_prog['numObjects'].value = len(shade_objs)
 
-        # moderngl doesn't let you write uniform arrays element by element
+        # moderngl doesn't let you index uniform arrays element by element
         pos_data   = np.zeros((4, 4), dtype=np.float32)
         color_data = np.zeros((4, 4), dtype=np.float32)
         for i, obj in enumerate(shade_objs):
@@ -552,7 +493,7 @@ def main():
         grid_ibo.write(idata.tobytes())
 
         view = look_at(cp, (0,0,0), (0,1,0))
-        proj = perspective(math.radians(60.0), asp, 1e9, 1e15)
+        proj = perspective(math.radians(60.0), asp, 1e9, 1e14)
         vp   = (proj @ view).T.flatten()
         grid_prog['viewProj'].write(vp.astype(np.float32).tobytes())
 
@@ -560,42 +501,10 @@ def main():
         grid_vao.render(moderngl.LINES, vertices=len(idata))
         ctx.enable(moderngl.DEPTH_TEST)
 
-        # draw the planets as billboards so they're visible on the grid
-        sphere_prog['viewProj'].write(vp.astype(np.float32).tobytes())
-        sphere_prog['camRight'].value = (rx, ry, rz)
-        sphere_prog['camUp'].value    = (ux, uy, uz)
-
-        for obj in objects[:-1]:
-            grid_y = 0.0
-            for src in objects:
-                r_s_src = 2.0 * G_CONST * src.mass / (C_LIGHT * C_LIGHT)
-                dx = float(obj.pos[0] - src.pos[0])
-                dz = float(obj.pos[2] - src.pos[2])
-                dist = math.sqrt(dx*dx + dz*dz)
-                if dist > r_s_src:
-                    grid_y += 2.0 * math.sqrt(r_s_src * (dist - r_s_src)) - 3e10
-                else:
-                    grid_y += 2.0 * r_s_src - 3e10
-
-            cx, cy, cz = float(obj.pos[0]), grid_y + obj.radius, float(obj.pos[2])
-            r, g, b    = obj.color.tolist()
-            rad        = obj.radius
-            inst = np.array([
-                cx, cy, cz, r, g, b, rad,
-                cx, cy, cz, r, g, b, rad,
-                cx, cy, cz, r, g, b, rad,
-                cx, cy, cz, r, g, b, rad,
-            ], dtype=np.float32)
-            sphere_vbo.write(inst.tobytes())
-            sphere_vao = ctx.vertex_array(sphere_prog, [
-                (sphere_vbo, '3f 3f 1f', 'aPos', 'aColor', 'aRadius')
-            ])
-            sphere_vao.render(moderngl.TRIANGLE_STRIP, vertices=4)
-
         fps = clock.get_fps()
         hud = font.render(
             f"FPS:{fps:.1f}  r={camera.radius:.2e}  G={'ON' if gravity else 'OFF'}  drag=orbit  scroll=zoom  G=gravity",
-            True, (80, 200, 255)
+            True, (80,200,255)
         )
 
         pygame.display.flip()
